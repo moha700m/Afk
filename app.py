@@ -737,4 +737,173 @@ class MainWindow(QMainWindow):
         }
         QPushButton[choice="true"] {
             min-height: 44px;
-           
+             background-color: #0A5195;
+            border-color: #157CC0;
+            border-radius: 15px;
+        }
+        QPushButton[choice="true"]:checked {
+            background-color: #19D3E9;
+            color: #04253F;
+            border: 2px solid #63F7FF;
+        }
+        QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox {
+            background-color: #0B4E8C;
+            border: 1px solid #177FC1;
+            border-radius: 12px;
+            min-height: 38px;
+            padding: 4px 12px;
+            color: white;
+        }
+        QComboBox::drop-down { border: 0; width: 34px; }
+        QSlider::groove:horizontal {
+            height: 7px; border-radius: 4px; background: #1C66AA;
+        }
+        QSlider::sub-page:horizontal { background: #22D7EF; border-radius: 4px; }
+        QSlider::handle:horizontal {
+            background: white; border: 2px solid #D9FFFF; width: 22px; margin: -8px 0; border-radius: 12px;
+        }
+        QTabWidget::pane { border: 0; background: transparent; }
+        QTabBar::tab {
+            background: #082D59; color: #8FB7DA; padding: 12px 24px; margin-right: 6px;
+            border-top-left-radius: 10px; border-top-right-radius: 10px;
+        }
+        QTabBar::tab:selected { background: #0D5E9E; color: white; }
+        QScrollArea { border: 0; background: transparent; }
+        QScrollArea > QWidget > QWidget { background: transparent; }
+        """)
+
+    def _build_ui(self):
+        root = QWidget()
+        root.setObjectName("root")
+        self.setCentralWidget(root)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(22, 20, 22, 20)
+        outer.setSpacing(16)
+
+        header = QHBoxLayout()
+        brand_box = QVBoxLayout()
+        brand = QLabel("AFK CONTROLLER")
+        brand.setObjectName("brand")
+        brand_box.addWidget(brand)
+        sub = QLabel("Screen Vision + Controller Engine")
+        sub.setObjectName("subtle")
+        brand_box.addWidget(sub)
+        header.addLayout(brand_box)
+        header.addStretch()
+        self.driver_label = QLabel("Drivers: checking...")
+        self.driver_label.setObjectName("subtle")
+        header.addWidget(self.driver_label)
+        outer.addLayout(header)
+
+        topbar = QFrame()
+        topbar.setObjectName("topbar")
+        top = QHBoxLayout(topbar)
+        top.setContentsMargins(18, 12, 18, 12)
+        top.addWidget(QLabel("Config:"))
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItems(["settings"])
+        self.profile_combo.setMinimumWidth(260)
+        top.addWidget(self.profile_combo)
+        reload_btn = QPushButton("Reload")
+        reload_btn.clicked.connect(self.reload_settings)
+        top.addWidget(reload_btn)
+        save_btn = QPushButton("Save")
+        save_btn.setProperty("primary", True)
+        save_btn.clicked.connect(self.save_settings)
+        top.addWidget(save_btn)
+        top.addStretch()
+        self.engine_label = QLabel("Engine: Stopped")
+        self.engine_label.setObjectName("engine")
+        top.addWidget(self.engine_label)
+        self.start_btn = QPushButton("START")
+        self.start_btn.setProperty("primary", True)
+        self.start_btn.clicked.connect(self.start_engine)
+        top.addWidget(self.start_btn)
+        self.stop_btn = QPushButton("STOP")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self.stop_engine)
+        top.addWidget(self.stop_btn)
+        outer.addWidget(topbar)
+
+        self.tabs = QTabWidget()
+        outer.addWidget(self.tabs, 1)
+        self.tabs.addTab(self._build_controller_tab(), "Controller Settings")
+        self.tabs.addTab(self._build_script_tab(), "AFK Script")
+        self.tabs.addTab(self._build_diagnostics_tab(), "Diagnostics")
+
+    def _switch_row(self, layout, row, text, key):
+        label = QLabel(text)
+        sw = Switch()
+        self.controls[key] = sw
+        layout.addWidget(label, row, 0)
+        layout.addWidget(sw, row, 1, alignment=Qt.AlignRight)
+
+    def _slider_row(self, layout, row, text, key, minimum, maximum, suffix="", scale=1):
+        label = QLabel(text)
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(minimum, maximum)
+        value = QLabel()
+        value.setMinimumWidth(64)
+        value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.controls[key] = (slider, scale)
+        def update(v):
+            shown = v / scale
+            value.setText(f"{shown:.2f}{suffix}" if scale != 1 else f"{v}{suffix}")
+        slider.valueChanged.connect(update)
+        update(slider.value())
+        layout.addWidget(label, row, 0)
+        box = QHBoxLayout()
+        box.addWidget(slider, 1)
+        box.addWidget(value)
+        layout.addLayout(box, row, 1)
+
+    def _build_controller_tab(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        wrap = QVBoxLayout(content)
+        wrap.setContentsMargins(6, 12, 6, 12)
+        wrap.setSpacing(16)
+
+        card = Card("Controller Settings")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(30)
+        grid.setVerticalSpacing(17)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 3)
+        self._switch_row(grid, 0, "Enable Aim Assist", "enable_aim_assist")
+        self._switch_row(grid, 1, "Enable Controller Input", "enable_controller_input")
+        self._switch_row(grid, 2, "Enable Virtual Controller", "enable_virtual_controller")
+        self._switch_row(grid, 3, "DS4 Output (off = Xbox 360)", "ds4_output")
+        self._switch_row(grid, 4, "Human Movement", "human_movement")
+        self._slider_row(grid, 5, "Human Strength", "human_strength", 0, 100, scale=100)
+
+        grid.addWidget(QLabel("Target Color"), 6, 0)
+        color_row = QHBoxLayout()
+        self.color_button = QPushButton(" ")
+        self.color_button.setFixedSize(44, 40)
+        self.color_button.clicked.connect(self.pick_color)
+        self.color_hex = QLineEdit()
+        self.color_hex.setAlignment(Qt.AlignCenter)
+        self.color_hex.editingFinished.connect(self.validate_color)
+        color_row.addWidget(self.color_button)
+        color_row.addWidget(self.color_hex, 1)
+        grid.addLayout(color_row, 6, 1)
+        self.controls["target_color"] = self.color_hex
+
+        self._slider_row(grid, 7, "Color Tolerance", "color_tolerance", 0, 100)
+
+        grid.addWidget(QLabel("Aim Trigger"), 8, 0, 1, 2)
+        self.aim_trigger = ChoiceButtons(["L2", "R2", "L2 + R2", "L1", "R1", "L1 + R1"], columns=3)
+        self.controls["aim_trigger"] = self.aim_trigger
+        grid.addWidget(self.aim_trigger, 9, 0, 1, 2)
+
+        grid.addWidget(QLabel("Aim Bone"), 10, 0, 1, 2)
+        self.aim_bone = ChoiceButtons(["Head", "Chest", "Random"], columns=3)
+        self.controls["aim_bone"] = self.aim_bone
+        grid.addWidget(self.aim_bone, 11, 0, 1, 2)
+
+        grid.addWidget(QLabel("Controller Input"), 12, 0)
+        controller_row = QHBoxLayout()
+        self.controller_slot = QComboBox()
+        self.con

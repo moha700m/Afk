@@ -57,3 +57,14 @@ or use GitHub Actions. The final artifact is:
 `AFKController.exe`
 
 End users do not need Python.
+
+
+## Controller Center v1.1
+- Windows device discovery with product name when available.
+- Automatic XInput slot detection.
+- Live left/right stick visualization.
+- L2/R2 trigger meters.
+- Live A/B/X/Y, bumpers, stick-click, Start/Back and D-pad test.
+- Deadzone and center-offset/drift meter.
+- Re-scan controllers without restarting the app.
+- Works independently of the main engine so controller diagnostics are available before START.

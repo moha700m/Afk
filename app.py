@@ -429,4 +429,146 @@ class EngineThread(QThread):
     def _sticky_fallback(self, settings):
         if settings.get("sticky_aim") and self.last_target:
             elapsed = (time.monotonic() - self.last_target_ts) * 1000
-           
+             max_ms = int(settings.get("sticky_time_ms", 140))
+            if elapsed < max_ms:
+                decay = (1 - elapsed / max_ms) * float(settings.get("sticky_strength", 0.55))
+                return int(self.last_target[0] * decay), int(self.last_target[1] * decay), int(self.last_target[2] * decay), True
+        self.smooth_x *= 0.62
+        self.smooth_y *= 0.62
+        return 0, 0, 0, False
+
+    def _apply_macros(self, st, settings, buttons, lt, rt, now, aim_active, fire_active):
+        # Hair triggers
+        if settings["hair_triggers"]:
+            if lt > 5:
+                lt = 255
+            if rt > 5:
+                rt = 255
+
+        # Auto hold breath: default COD focus is LS in the supplied AFK script.
+        if settings["auto_hold_breath"] and aim_active:
+            buttons |= XINPUT_GAMEPAD_LEFT_THUMB
+
+        # Auto ping on first fire press while aiming.
+        if settings["auto_ping"] and aim_active and fire_active and not self.last_fire:
+            self.ping_until = now + 0.055
+        if now < self.ping_until:
+            buttons |= XINPUT_GAMEPAD_DPAD_UP
+
+        # Bunny hop while jump is held.
+        if settings["bunny_hop"] and (st.Gamepad.wButtons & XINPUT_GAMEPAD_A):
+            if now - self.last_hop_toggle >= 0.085:
+                self.hop_phase = not self.hop_phase
+                self.last_hop_toggle = now
+            if not self.hop_phase:
+                buttons &= ~XINPUT_GAMEPAD_A
+
+        # Slide cancel: after quick B release, pulse sprint.
+        was_b = bool(self.prev_buttons & XINPUT_GAMEPAD_B)
+        is_b = bool(st.Gamepad.wButtons & XINPUT_GAMEPAD_B)
+        if settings["slide_cancel"] and was_b and not is_b and not aim_active and not fire_active:
+            self.slide_until = now + 0.11
+        if now < self.slide_until:
+            buttons |= XINPUT_GAMEPAD_LEFT_THUMB
+
+        # YY spam while sprint is held, mirroring the GPC behavior.
+        yy_ms = int(settings.get("yy_spam_ms", 0))
+        if yy_ms > 0 and (st.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) and not aim_active and not fire_active:
+            period = max(0.03, yy_ms / 1000.0)
+            if now >= self.yy_until:
+                self.yy_phase = (self.yy_phase + 1) % 4
+                self.yy_until = now + period
+            if self.yy_phase in (0, 2):
+                buttons |= XINPUT_GAMEPAD_Y
+            else:
+                buttons &= ~XINPUT_GAMEPAD_Y
+
+        # Rapid fire works for the configured primary fire button.
+        rps = int(settings.get("rapid_fire_rps", 0))
+        if rps > 0 and fire_active:
+            half = 0.5 / max(1, rps)
+            if now - self.last_rapid_toggle >= half:
+                self.rapid_phase = not self.rapid_phase
+                self.last_rapid_toggle = now
+            if settings.get("fire_button") == "R1":
+                if self.rapid_phase:
+                    buttons |= XINPUT_GAMEPAD_RIGHT_SHOULDER
+                else:
+                    buttons &= ~XINPUT_GAMEPAD_RIGHT_SHOULDER
+            else:
+                rt = 255 if self.rapid_phase else 0
+
+        self.last_fire = fire_active
+        self.prev_buttons = st.Gamepad.wButtons
+        return buttons, lt, rt
+
+    def _output_x360(self, buttons, lt, rt, lx, ly, rx, ry):
+        vg = self.vg
+        mapping = [
+            (XINPUT_GAMEPAD_DPAD_UP, vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP),
+            (XINPUT_GAMEPAD_DPAD_DOWN, vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN),
+            (XINPUT_GAMEPAD_DPAD_LEFT, vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT),
+            (XINPUT_GAMEPAD_DPAD_RIGHT, vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT),
+            (XINPUT_GAMEPAD_START, vg.XUSB_BUTTON.XUSB_GAMEPAD_START),
+            (XINPUT_GAMEPAD_BACK, vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK),
+            (XINPUT_GAMEPAD_LEFT_THUMB, vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB),
+            (XINPUT_GAMEPAD_RIGHT_THUMB, vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB),
+            (XINPUT_GAMEPAD_LEFT_SHOULDER, vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER),
+            (XINPUT_GAMEPAD_RIGHT_SHOULDER, vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER),
+            (XINPUT_GAMEPAD_A, vg.XUSB_BUTTON.XUSB_GAMEPAD_A),
+            (XINPUT_GAMEPAD_B, vg.XUSB_BUTTON.XUSB_GAMEPAD_B),
+            (XINPUT_GAMEPAD_X, vg.XUSB_BUTTON.XUSB_GAMEPAD_X),
+            (XINPUT_GAMEPAD_Y, vg.XUSB_BUTTON.XUSB_GAMEPAD_Y),
+        ]
+        for mask, out_btn in mapping:
+            if buttons & mask:
+                self.virtual.press_button(button=out_btn)
+            else:
+                self.virtual.release_button(button=out_btn)
+        self.virtual.left_trigger(value=int(lt))
+        self.virtual.right_trigger(value=int(rt))
+        self.virtual.left_joystick(x_value=int(lx), y_value=int(ly))
+        self.virtual.right_joystick(x_value=int(rx), y_value=int(ry))
+        self.virtual.update()
+
+    def _output_ds4(self, buttons, lt, rt, lx, ly, rx, ry):
+        vg = self.vg
+        mapping = [
+            (XINPUT_GAMEPAD_START, vg.DS4_BUTTONS.DS4_BUTTON_OPTIONS),
+            (XINPUT_GAMEPAD_BACK, vg.DS4_BUTTONS.DS4_BUTTON_SHARE),
+            (XINPUT_GAMEPAD_LEFT_THUMB, vg.DS4_BUTTONS.DS4_BUTTON_THUMB_LEFT),
+            (XINPUT_GAMEPAD_RIGHT_THUMB, vg.DS4_BUTTONS.DS4_BUTTON_THUMB_RIGHT),
+            (XINPUT_GAMEPAD_LEFT_SHOULDER, vg.DS4_BUTTONS.DS4_BUTTON_SHOULDER_LEFT),
+            (XINPUT_GAMEPAD_RIGHT_SHOULDER, vg.DS4_BUTTONS.DS4_BUTTON_SHOULDER_RIGHT),
+            (XINPUT_GAMEPAD_A, vg.DS4_BUTTONS.DS4_BUTTON_CROSS),
+            (XINPUT_GAMEPAD_B, vg.DS4_BUTTONS.DS4_BUTTON_CIRCLE),
+            (XINPUT_GAMEPAD_X, vg.DS4_BUTTONS.DS4_BUTTON_SQUARE),
+            (XINPUT_GAMEPAD_Y, vg.DS4_BUTTONS.DS4_BUTTON_TRIANGLE),
+        ]
+        for mask, out_btn in mapping:
+            if buttons & mask:
+                self.virtual.press_button(button=out_btn)
+            else:
+                self.virtual.release_button(button=out_btn)
+
+        up, down = bool(buttons & XINPUT_GAMEPAD_DPAD_UP), bool(buttons & XINPUT_GAMEPAD_DPAD_DOWN)
+        left, right = bool(buttons & XINPUT_GAMEPAD_DPAD_LEFT), bool(buttons & XINPUT_GAMEPAD_DPAD_RIGHT)
+        direction = vg.DS4_DPAD_DIRECTIONS.DS4_BUTTON_DPAD_NONE
+        if up and left:
+            direction = vg.DS4_DPAD_DIRECTIONS.DS4_BUTTON_DPAD_NORTHWEST
+        elif up and right:
+            direction = vg.DS4_DPAD_DIRECTIONS.DS4_BUTTON_DPAD_NORTHEAST
+        elif down and left:
+            direction = vg.DS4_DPAD_DIRECTIONS.DS4_BUTTON_DPAD_SOUTHWEST
+        elif down and right:
+            direction = vg.DS4_DPAD_DIRECTIONS.DS4_BUTTON_DPAD_SOUTHEAST
+        elif up:
+            direction = vg.DS4_DPAD_DIRECTIONS.DS4_BUTTON_DPAD_NORTH
+        elif down:
+            direction = vg.DS4_DPAD_DIRECTIONS.DS4_BUTTON_DPAD_SOUTH
+        elif left:
+            direction = vg.DS4_DPAD_DIRECTIONS.DS4_BUTTON_DPAD_WEST
+        elif right:
+            direction = vg.DS4_DPAD_DIRECTIONS.DS4_BUTTON_DPAD_EAST
+        self.virtual.directional_pad(direction=direction)
+        self.virtual.left_trigger(value=int(lt))

@@ -251,3 +251,182 @@ class EngineThread(QThread):
 
     def __init__(self, settings: dict):
         super().__init__()
+        self.settings = dict(settings)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self.xinput = None
+        self.slot = None
+        self.virtual = None
+        self.vg = None
+        self.is_ds4 = False
+        self.camera = None
+        self.smooth_x = 0.0
+        self.smooth_y = 0.0
+        self.last_target = None
+        self.last_target_ts = 0.0
+        self.last_fire = False
+        self.prev_buttons = 0
+        self.ping_until = 0.0
+        self.slide_until = 0.0
+        self.yy_phase = 0
+        self.yy_until = 0.0
+        self.hop_phase = False
+        self.last_hop_toggle = 0.0
+        self.rapid_phase = False
+        self.last_rapid_toggle = 0.0
+        self.human_phase = 0.0
+
+    def stop(self):
+        self._stop.set()
+
+    def update_settings(self, settings: dict):
+        with self._lock:
+            old_ds4 = self.settings.get("ds4_output")
+            old_virtual = self.settings.get("enable_virtual_controller")
+            self.settings = dict(settings)
+            if old_ds4 != self.settings.get("ds4_output") or old_virtual != self.settings.get("enable_virtual_controller"):
+                self._reset_virtual()
+
+    def _snapshot(self):
+        with self._lock:
+            return dict(self.settings)
+
+    def _find_slot(self, requested):
+        if self.xinput is None:
+            self.xinput = xinput_dll()
+        slots = range(4) if requested == "Auto" else [int(requested)]
+        for slot in slots:
+            st = XINPUT_STATE()
+            if self.xinput.XInputGetState(slot, ctypes.byref(st)) == 0:
+                return slot
+        return None
+
+    def _read_state(self, slot):
+        st = XINPUT_STATE()
+        if slot is None or self.xinput.XInputGetState(slot, ctypes.byref(st)) != 0:
+            return None
+        return st
+
+    def _reset_virtual(self):
+        if self.virtual is not None:
+            try:
+                self.virtual.reset()
+                self.virtual.update()
+            except Exception:
+                pass
+        self.virtual = None
+        self.vg = None
+
+    def _ensure_virtual(self, settings):
+        if not settings["enable_virtual_controller"]:
+            self._reset_virtual()
+            return False
+        if self.virtual is not None and self.is_ds4 == bool(settings["ds4_output"]):
+            return True
+        if not service_exists("ViGEmBus"):
+            raise RuntimeError("ViGEmBus is missing. Install it from the Drivers button, reboot once, then start again.")
+        self._reset_virtual()
+        try:
+            import vgamepad as vg
+        except Exception as e:
+            if "VIGEM_ERROR_BUS_NOT_FOUND" in str(e):
+                raise RuntimeError("ViGEmBus is installed but the bus is not available. Reboot Windows once and try again.") from e
+            raise
+        self.vg = vg
+        self.is_ds4 = bool(settings["ds4_output"])
+        self.virtual = vg.VDS4Gamepad() if self.is_ds4 else vg.VX360Gamepad()
+        return True
+
+    @staticmethod
+    def _button(st, mask):
+        return bool(st.Gamepad.wButtons & mask)
+
+    def _trigger_active(self, st, mode):
+        lt = st.Gamepad.bLeftTrigger > 45
+        rt = st.Gamepad.bRightTrigger > 45
+        lb = self._button(st, XINPUT_GAMEPAD_LEFT_SHOULDER)
+        rb = self._button(st, XINPUT_GAMEPAD_RIGHT_SHOULDER)
+        return {
+            "L2": lt, "R2": rt, "L2 + R2": lt and rt,
+            "L1": lb, "R1": rb, "L1 + R1": lb and rb,
+        }.get(mode, lt)
+
+    def _fire_active(self, st, settings):
+        if settings.get("fire_button") == "R1":
+            return self._button(st, XINPUT_GAMEPAD_RIGHT_SHOULDER)
+        return st.Gamepad.bRightTrigger > 45
+
+    def _screen_target(self, settings):
+        if not settings["enable_aim_assist"]:
+            return 0, 0, 0, False
+        if self.camera is None:
+            self.camera = dxcam.create(output_color="BGR")
+        user32 = ctypes.windll.user32
+        w = user32.GetSystemMetrics(0)
+        h = user32.GetSystemMetrics(1)
+        fov = int(clamp(settings["fov"], 50, 600))
+        cx, cy = w // 2, h // 2
+        left, top, right, bottom = max(0, cx - fov), max(0, cy - fov), min(w, cx + fov), min(h, cy + fov)
+        frame = self.camera.grab(region=(left, top, right, bottom))
+        if frame is None:
+            return 0, 0, 0, False
+
+        r, g, b = hex_to_rgb(settings["target_color"])
+        target = np.array([b, g, r], dtype=np.int16)
+        diff = np.abs(frame.astype(np.int16) - target)
+        tol = int(clamp(settings["color_tolerance"], 0, 100))
+        mask = (np.max(diff, axis=2) <= tol).astype(np.uint8) * 255
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+        if count <= 1:
+            return self._sticky_fallback(settings)
+
+        fc_x, fc_y = frame.shape[1] / 2, frame.shape[0] / 2
+        best = None
+        for i in range(1, count):
+            x, y, ww, hh, area = stats[i]
+            if area < 4 or area > 18000:
+                continue
+            tx = x + ww / 2
+            bone = settings["aim_bone"]
+            if bone == "Head":
+                ty = y + hh * 0.20
+            elif bone == "Random":
+                ty = y + hh * random.uniform(0.20, 0.52)
+            else:
+                ty = y + hh * 0.45
+            dist = math.hypot(tx - fc_x, ty - fc_y)
+            if dist > fov:
+                continue
+            score = dist - min(area, 250) * 0.03
+            if best is None or score < best[0]:
+                best = (score, tx, ty, dist, area)
+
+        if best is None:
+            return self._sticky_fallback(settings)
+
+        _, tx, ty, dist, area = best
+        dx, dy = tx - fc_x, ty - fc_y
+        smooth = float(clamp(settings["smoothing"], 0.01, 1.0))
+        self.smooth_x += (dx - self.smooth_x) * smooth
+        self.smooth_y += (dy - self.smooth_y) * smooth
+        strength = float(clamp(settings["aim_strength"], 0.01, 1.0))
+        max_corr = int(clamp(settings["max_correction"], 500, 20000))
+        ox = int(clamp((self.smooth_x / fov) * 32767 * strength, -max_corr, max_corr))
+        oy = int(clamp(-(self.smooth_y / fov) * 32767 * strength, -max_corr, max_corr))
+
+        if settings["human_movement"]:
+            hs = float(clamp(settings["human_strength"], 0.0, 1.0))
+            self.human_phase += 0.13 + hs * 0.08
+            ox += int(math.sin(self.human_phase) * max_corr * 0.025 * hs)
+            oy += int(math.sin(self.human_phase * 0.77 + 1.2) * max_corr * 0.018 * hs)
+
+        confidence = int(clamp((1 - dist / max(fov, 1)) * 78 + min(1, area / 60) * 22, 0, 100))
+        self.last_target = (ox, oy, confidence)
+        self.last_target_ts = time.monotonic()
+        return ox, oy, confidence, True
+
+    def _sticky_fallback(self, settings):
+        if settings.get("sticky_aim") and self.last_target:
+            elapsed = (time.monotonic() - self.last_target_ts) * 1000
+           

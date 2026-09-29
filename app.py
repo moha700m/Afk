@@ -572,3 +572,169 @@ class EngineThread(QThread):
             direction = vg.DS4_DPAD_DIRECTIONS.DS4_BUTTON_DPAD_EAST
         self.virtual.directional_pad(direction=direction)
         self.virtual.left_trigger(value=int(lt))
+        self.virtual.right_trigger(value=int(rt))
+        self.virtual.left_joystick_float(x_value_float=clamp(lx / 32767.0, -1, 1), y_value_float=clamp(-ly / 32767.0, -1, 1))
+        self.virtual.right_joystick_float(x_value_float=clamp(rx / 32767.0, -1, 1), y_value_float=clamp(-ry / 32767.0, -1, 1))
+        self.virtual.update()
+
+    def run(self):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+        try:
+            self.xinput = xinput_dll()
+            self.status.emit("Engine: Starting")
+            frame_count = 0
+            fps = 0.0
+            fps_start = time.perf_counter()
+            while not self._stop.is_set():
+                settings = self._snapshot()
+                requested = settings.get("controller_slot", "Auto")
+                if self.slot is None or requested != "Auto" and self.slot != int(requested):
+                    self.slot = self._find_slot(requested)
+                state = self._read_state(self.slot)
+                if state is None:
+                    self.slot = self._find_slot(requested)
+                    state = self._read_state(self.slot)
+
+                virtual_ready = False
+                try:
+                    virtual_ready = self._ensure_virtual(settings)
+                except Exception as e:
+                    self.status.emit("Engine: Driver Required")
+                    self.error.emit(str(e))
+                    self._reset_virtual()
+                    time.sleep(0.8)
+                    continue
+
+                if state is None:
+                    self.telemetry.emit({
+                        "controller": False, "slot": None, "target": False, "confidence": 0,
+                        "fps": fps, "virtual": virtual_ready, "rx": 0, "ry": 0,
+                    })
+                    time.sleep(0.12)
+                    continue
+
+                aim_active = self._trigger_active(state, settings["aim_trigger"])
+                fire_active = self._fire_active(state, settings)
+                ox = oy = conf = 0
+                target_found = False
+                if aim_active and settings["enable_aim_assist"]:
+                    ox, oy, conf, target_found = self._screen_target(settings)
+
+                # Anti-recoil from the supplied GPC: only while firing.
+                if settings["anti_recoil"] and fire_active:
+                    ox += int(settings["recoil_horizontal"] * 327)
+                    oy += int(settings["recoil_vertical"] * 327)
+
+                gp = state.Gamepad
+                buttons = int(gp.wButtons) if settings["enable_controller_input"] else 0
+                lt = int(gp.bLeftTrigger) if settings["enable_controller_input"] else 0
+                rt = int(gp.bRightTrigger) if settings["enable_controller_input"] else 0
+                lx = int(gp.sThumbLX) if settings["enable_controller_input"] else 0
+                ly = int(gp.sThumbLY) if settings["enable_controller_input"] else 0
+                rx = int(gp.sThumbRX) if settings["enable_controller_input"] else 0
+                ry = int(gp.sThumbRY) if settings["enable_controller_input"] else 0
+
+                now = time.monotonic()
+                buttons, lt, rt = self._apply_macros(state, settings, buttons, lt, rt, now, aim_active, fire_active)
+                rx = int(clamp(rx + ox, -32768, 32767))
+                ry = int(clamp(ry + oy, -32768, 32767))
+
+                if virtual_ready:
+                    if self.is_ds4:
+                        self._output_ds4(buttons, lt, rt, lx, ly, rx, ry)
+                    else:
+                        self._output_x360(buttons, lt, rt, lx, ly, rx, ry)
+
+                frame_count += 1
+                now_perf = time.perf_counter()
+                if now_perf - fps_start >= 0.5:
+                    fps = frame_count / (now_perf - fps_start)
+                    frame_count = 0
+                    fps_start = now_perf
+                    self.telemetry.emit({
+                        "controller": True, "slot": self.slot, "target": target_found,
+                        "confidence": conf, "fps": fps, "virtual": virtual_ready,
+                        "rx": rx, "ry": ry,
+                    })
+                    self.status.emit("Engine: Running")
+
+                time.sleep(1 / max(120, int(settings.get("capture_fps", 120)) * 3))
+        except Exception as e:
+            self.error.emit(str(e))
+            self.status.emit("Engine: Error")
+        finally:
+            self._reset_virtual()
+            self.status.emit("Engine: Stopped")
+
+
+class Card(QFrame):
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("card")
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(26, 24, 26, 24)
+        self.layout.setSpacing(16)
+        label = QLabel(title)
+        label.setObjectName("cardTitle")
+        self.layout.addWidget(label)
+
+
+class MainWindow(QMainWindow):
+    driver_message = Signal(str)
+    driver_error = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.settings = load_settings()
+        self.engine = None
+        self.controls = {}
+        self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
+        self.setMinimumSize(1100, 780)
+        self.resize(1180, 840)
+        self._build_ui()
+        self.driver_message.connect(self.engine_label_set_safe)
+        self.driver_error.connect(self.on_error)
+        self._apply_style()
+        self._load_to_ui()
+        self._update_driver_status()
+
+    def _apply_style(self):
+        self.setStyleSheet("""
+        QMainWindow, QWidget#root {
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #041936, stop:0.52 #072b58, stop:1 #061b3f);
+            color: #EAF7FF;
+            font-family: 'Segoe UI';
+            font-size: 14px;
+        }
+        QLabel { color: #D7EBFF; }
+        QLabel#brand { font-size: 22px; font-weight: 800; color: white; }
+        QLabel#subtle { color: #79A7D0; font-size: 12px; }
+        QLabel#engine { color: #56F5C4; font-size: 15px; font-weight: 700; }
+        QLabel#cardTitle { color: #FFFFFF; font-size: 19px; font-weight: 800; }
+        QFrame#topbar, QFrame#card {
+            background-color: rgba(6, 43, 92, 220);
+            border: 1px solid #167BC0;
+            border-radius: 20px;
+        }
+        QFrame#topbar { border-radius: 16px; }
+        QPushButton {
+            background-color: #0B5FA4;
+            border: 1px solid #158ED1;
+            border-radius: 13px;
+            color: #EAF8FF;
+            padding: 10px 18px;
+            font-weight: 650;
+        }
+        QPushButton:hover { background-color: #1178C1; border-color: #23CFF4; }
+        QPushButton:pressed { background-color: #0A4F8D; }
+        QPushButton[primary="true"] {
+            background-color: #20CFEA;
+            color: #032343;
+            border-color: #41ECFF;
+        }
+        QPushButton[choice="true"] {
+            min-height: 44px;
+           

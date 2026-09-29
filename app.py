@@ -18,6 +18,8 @@ import dxcam
 import numpy as np
 from PySide6.QtCore import Qt, QThread, Signal, QSize
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont
+from controller_lab import ControllerLab, CONTROLLER_LAB_QSS
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QFrame, QSlider, QLineEdit, QComboBox, QColorDialog,
@@ -26,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "AFK Controller"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "AFKController"
 CONFIG_PATH = APP_DIR / "settings.json"
 PROFILES_DIR = APP_DIR / "profiles"
@@ -710,8 +712,12 @@ class MainWindow(QMainWindow):
             font-size: 14px;
         }
         QLabel { color: #D7EBFF; }
-        QLabel#brand { font-size: 22px; font-weight: 800; color: white; }
+        QLabel#brand { font-size: 24px; font-weight: 900; color: white; letter-spacing: 1px; }
         QLabel#subtle { color: #79A7D0; font-size: 12px; }
+        QLabel#versionChip {
+            color: #BFFAFF; background:#0B557F; border:1px solid #1CCEE8;
+            border-radius:10px; padding:5px 10px; font-weight:800;
+        }
         QLabel#engine { color: #56F5C4; font-size: 15px; font-weight: 700; }
         QLabel#cardTitle { color: #FFFFFF; font-size: 19px; font-weight: 800; }
         QFrame#topbar, QFrame#card {
@@ -764,13 +770,19 @@ class MainWindow(QMainWindow):
         }
         QTabWidget::pane { border: 0; background: transparent; }
         QTabBar::tab {
-            background: #082D59; color: #8FB7DA; padding: 12px 24px; margin-right: 6px;
-            border-top-left-radius: 10px; border-top-right-radius: 10px;
+            background: #082D59; color: #8FB7DA; padding: 13px 24px; margin-right: 7px;
+            border: 1px solid #123F70; border-bottom: 0;
+            border-top-left-radius: 11px; border-top-right-radius: 11px;
+            font-weight: 700;
         }
-        QTabBar::tab:selected { background: #0D5E9E; color: white; }
+        QTabBar::tab:hover { background:#0B477E; color:#D7F5FF; border-color:#1979B5; }
+        QTabBar::tab:selected {
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0E6FA9, stop:1 #10AFC6);
+            color: white; border-color:#27D9EA;
+        }
         QScrollArea { border: 0; background: transparent; }
         QScrollArea > QWidget > QWidget { background: transparent; }
-        """)
+        """ + CONTROLLER_LAB_QSS)
 
     def _build_ui(self):
         root = QWidget()
@@ -789,6 +801,9 @@ class MainWindow(QMainWindow):
         sub.setObjectName("subtle")
         brand_box.addWidget(sub)
         header.addLayout(brand_box)
+        version_chip = QLabel(f"v{APP_VERSION}")
+        version_chip.setObjectName("versionChip")
+        header.addWidget(version_chip)
         header.addStretch()
         self.driver_label = QLabel("Drivers: checking...")
         self.driver_label.setObjectName("subtle")
@@ -826,10 +841,18 @@ class MainWindow(QMainWindow):
         outer.addWidget(topbar)
 
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
         outer.addWidget(self.tabs, 1)
         self.tabs.addTab(self._build_controller_tab(), "Controller Settings")
+        self.controller_lab = ControllerLab()
+        self.controller_lab.xinput_slot_detected.connect(self._lab_slot_detected)
+        self.tabs.addTab(self.controller_lab, "Controller Center")
         self.tabs.addTab(self._build_script_tab(), "AFK Script")
         self.tabs.addTab(self._build_diagnostics_tab(), "Diagnostics")
+
+    def _lab_slot_detected(self, slot):
+        if hasattr(self, "controller_status") and self.controller_slot.currentText() == "Auto":
+            self.controller_status.setText(f"Auto: XInput Controller (slot {slot})")
 
     def _switch_row(self, layout, row, text, key):
         label = QLabel(text)

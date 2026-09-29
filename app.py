@@ -1065,4 +1065,120 @@ class MainWindow(QMainWindow):
 
     def validate_color(self):
         try:
-            self.color_hex
+            self.color_hex.setText(normalize_hex(self.color_hex.text()))
+            self._refresh_color_button()
+        except Exception:
+            QMessageBox.warning(self, APP_NAME, "Target color must use Hex format, for example #E600FF")
+            self.color_hex.setText(self.settings.get("target_color", "#E600FF"))
+            self._refresh_color_button()
+
+    def _refresh_color_button(self):
+        color = self.color_hex.text() if hasattr(self, "color_hex") else "#E600FF"
+        try:
+            color = normalize_hex(color)
+        except Exception:
+            color = "#E600FF"
+        self.color_button.setStyleSheet(f"background:{color}; border:2px solid #E9FFFF; border-radius:9px;")
+
+    def start_engine(self):
+        try:
+            self.settings = self._collect_ui()
+            atomic_save_json(CONFIG_PATH, self.settings)
+        except Exception as e:
+            QMessageBox.critical(self, APP_NAME, str(e))
+            return
+        if self.engine and self.engine.isRunning():
+            return
+        self.engine = EngineThread(self.settings)
+        self.engine.status.connect(self.on_status)
+        self.engine.telemetry.connect(self.on_telemetry)
+        self.engine.error.connect(self.on_error)
+        self.engine.start()
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+
+    def stop_engine(self):
+        if self.engine and self.engine.isRunning():
+            self.engine.stop()
+            self.engine.wait(2000)
+        self.engine = None
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.engine_label.setText("Engine: Stopped")
+
+    def on_status(self, text):
+        self.engine_label.setText(text)
+        if text.endswith("Stopped") or text.endswith("Error"):
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+
+    def on_error(self, text):
+        self.diag.setText("ERROR\n" + text)
+
+    def on_telemetry(self, t):
+        controller = "CONNECTED" if t.get("controller") else "NOT FOUND"
+        virtual = "READY" if t.get("virtual") else "OFF"
+        target = "LOCKED" if t.get("target") else "NONE"
+        slot = t.get("slot")
+        self.controller_status.setText(f"Auto: XInput Controller (slot {slot})" if slot is not None else "Auto: no controller")
+        self.diag.setText(
+            f"Controller: {controller}\n"
+            f"XInput Slot: {slot if slot is not None else '--'}\n"
+            f"Virtual Controller: {virtual}\n"
+            f"Target: {target}\n"
+            f"Confidence: {t.get('confidence', 0)}%\n"
+            f"Engine FPS: {t.get('fps', 0):.0f}\n"
+            f"Right Stick Output: RX {t.get('rx', 0)} / RY {t.get('ry', 0)}\n"
+            f"ViGEmBus: {'READY' if service_exists('ViGEmBus') else 'MISSING'}\n"
+            f"HidHide: {'READY' if service_exists('HidHide') else 'OPTIONAL'}"
+        )
+
+    def _update_driver_status(self):
+        vigem = "ViGEm READY" if service_exists("ViGEmBus") else "ViGEm MISSING"
+        hidhide = "HidHide READY" if service_exists("HidHide") else "HidHide optional"
+        self.driver_label.setText(f"{vigem}  •  {hidhide}")
+
+    def install_drivers(self):
+        def job():
+            try:
+                folder = Path(tempfile.mkdtemp(prefix="afk_drivers_"))
+                if not service_exists("ViGEmBus"):
+                    target = folder / "ViGEmBus.exe"
+                    download_file(VIGEM_URL, target)
+                    run_as_admin(target, "/qn")
+                    time.sleep(2)
+                if not service_exists("HidHide"):
+                    target = folder / "HidHide.exe"
+                    download_file(HIDHIDE_URL, target)
+                    run_as_admin(target, "/install /quiet")
+                self.driver_message.emit("Engine: Driver setup launched")
+            except Exception as e:
+                self.driver_error.emit(f"Driver setup failed: {e}")
+        threading.Thread(target=job, daemon=True).start()
+
+
+    def engine_label_set_safe(self, text):
+        self.engine_label.setText(text)
+        self._update_driver_status()
+
+    def open_hidhide_clicked(self):
+        if not open_hidhide():
+            QMessageBox.information(self, APP_NAME, "HidHide is not installed yet. Use Install / Repair Drivers first.")
+
+    def closeEvent(self, event):
+        self.stop_engine()
+        event.accept()
+
+
+def main():
+    app = QApplication([])
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName("Mohammed Lab")
+    app.setFont(QFont("Segoe UI", 10))
+    window = MainWindow()
+    window.show()
+    app.exec()
+
+
+if __name__ == "__main__":
+    main()

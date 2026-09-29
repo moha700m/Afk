@@ -39,7 +39,7 @@ jobs:
       - name: Validate source and UI
         shell: pwsh
         run: |
-          python -m py_compile app.py
+          python -m py_compile app.py controller_lab.py
           python -m compileall -q vgamepad
           $env:QT_QPA_PLATFORM='offscreen'
           python -c "from PySide6.QtWidgets import QApplication; import app; q=QApplication([]); w=app.MainWindow(); print(w.windowTitle()); w.close()"

@@ -906,4 +906,163 @@ class MainWindow(QMainWindow):
         grid.addWidget(QLabel("Controller Input"), 12, 0)
         controller_row = QHBoxLayout()
         self.controller_slot = QComboBox()
-        self.con
+        self.controller_slot.addItems(["Auto", "0", "1", "2", "3"])
+        self.controls["controller_slot"] = self.controller_slot
+        self.controller_status = QLabel("Auto: waiting for controller")
+        self.controller_status.setObjectName("subtle")
+        controller_row.addWidget(self.controller_slot)
+        controller_row.addWidget(self.controller_status, 1)
+        grid.addLayout(controller_row, 12, 1)
+
+        grid.addWidget(QLabel("Hide Controller"), 13, 0)
+        hide_row = QHBoxLayout()
+        self.hide_combo = QComboBox()
+        self.hide_combo.addItems(["Auto", "Off"])
+        self.controls["hide_controller_mode"] = self.hide_combo
+        hide_row.addWidget(self.hide_combo)
+        hide_btn = QPushButton("Open HidHide")
+        hide_btn.clicked.connect(self.open_hidhide_clicked)
+        hide_row.addWidget(hide_btn)
+        grid.addLayout(hide_row, 13, 1)
+
+        card.layout.addLayout(grid)
+        wrap.addWidget(card)
+
+        vision = Card("Vision Response")
+        vg = QGridLayout()
+        vg.setHorizontalSpacing(30)
+        vg.setVerticalSpacing(16)
+        vg.setColumnStretch(0, 1)
+        vg.setColumnStretch(1, 3)
+        self._slider_row(vg, 0, "FOV Radius", "fov", 50, 500)
+        self._slider_row(vg, 1, "Aim Strength", "aim_strength", 1, 100, scale=100)
+        self._slider_row(vg, 2, "Smoothing", "smoothing", 1, 100, scale=100)
+        self._slider_row(vg, 3, "Max Correction", "max_correction", 500, 15000)
+        self._switch_row(vg, 4, "Sticky Aim", "sticky_aim")
+        self._slider_row(vg, 5, "Sticky Time", "sticky_time_ms", 20, 500, suffix=" ms")
+        self._slider_row(vg, 6, "Sticky Strength", "sticky_strength", 1, 100, scale=100)
+        vision.layout.addLayout(vg)
+        wrap.addWidget(vision)
+        wrap.addStretch()
+        scroll.setWidget(content)
+        return scroll
+
+    def _build_script_tab(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        wrap = QVBoxLayout(content)
+        wrap.setContentsMargins(6, 12, 6, 12)
+        wrap.setSpacing(16)
+
+        card = Card("AFK Script Logic")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(30)
+        grid.setVerticalSpacing(16)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 3)
+        self._switch_row(grid, 0, "Anti-Recoil", "anti_recoil")
+        self._slider_row(grid, 1, "Vertical Recoil", "recoil_vertical", 0, 100)
+        self._slider_row(grid, 2, "Horizontal Recoil", "recoil_horizontal", -100, 100)
+        self._switch_row(grid, 3, "Hair Triggers", "hair_triggers")
+        self._switch_row(grid, 4, "Auto Hold Breath", "auto_hold_breath")
+        self._switch_row(grid, 5, "Auto Ping", "auto_ping")
+        self._switch_row(grid, 6, "Bunny Hop", "bunny_hop")
+        self._switch_row(grid, 7, "Slide Cancel", "slide_cancel")
+        self._slider_row(grid, 8, "Rapid Fire", "rapid_fire_rps", 0, 10, suffix=" RPS")
+        self._slider_row(grid, 9, "YY Spam Delay", "yy_spam_ms", 0, 100, suffix=" ms")
+        grid.addWidget(QLabel("Fire Button"), 10, 0)
+        fire = ChoiceButtons(["R2", "R1"], selected="R2", columns=2)
+        self.controls["fire_button"] = fire
+        grid.addWidget(fire, 10, 1)
+        card.layout.addLayout(grid)
+        wrap.addWidget(card)
+        wrap.addStretch()
+        scroll.setWidget(content)
+        return scroll
+
+    def _build_diagnostics_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(6, 12, 6, 12)
+        card = Card("Live Diagnostics")
+        self.diag = QLabel("Engine stopped")
+        self.diag.setWordWrap(True)
+        self.diag.setStyleSheet("font-family: Consolas; font-size: 14px; line-height: 1.4;")
+        card.layout.addWidget(self.diag)
+        buttons = QHBoxLayout()
+        driver_btn = QPushButton("Install / Repair Drivers")
+        driver_btn.setProperty("primary", True)
+        driver_btn.clicked.connect(self.install_drivers)
+        buttons.addWidget(driver_btn)
+        open_data = QPushButton("Open Data Folder")
+        open_data.clicked.connect(lambda: (APP_DIR.mkdir(parents=True, exist_ok=True), os.startfile(APP_DIR)))
+        buttons.addWidget(open_data)
+        buttons.addStretch()
+        card.layout.addLayout(buttons)
+        layout.addWidget(card)
+        layout.addStretch()
+        return page
+
+    def _load_to_ui(self):
+        for key, widget in self.controls.items():
+            value = self.settings.get(key, DEFAULTS.get(key))
+            if isinstance(widget, Switch):
+                widget.setChecked(bool(value))
+            elif isinstance(widget, tuple):
+                slider, scale = widget
+                slider.setValue(int(round(float(value) * scale)))
+            elif isinstance(widget, ChoiceButtons):
+                widget.set_value(str(value))
+            elif isinstance(widget, QComboBox):
+                idx = widget.findText(str(value))
+                if idx >= 0:
+                    widget.setCurrentIndex(idx)
+            elif isinstance(widget, QLineEdit):
+                widget.setText(str(value))
+        self._refresh_color_button()
+
+    def _collect_ui(self):
+        data = dict(self.settings)
+        for key, widget in self.controls.items():
+            if isinstance(widget, Switch):
+                data[key] = widget.isChecked()
+            elif isinstance(widget, tuple):
+                slider, scale = widget
+                data[key] = slider.value() / scale if scale != 1 else slider.value()
+            elif isinstance(widget, ChoiceButtons):
+                data[key] = widget.value()
+            elif isinstance(widget, QComboBox):
+                data[key] = widget.currentText()
+            elif isinstance(widget, QLineEdit):
+                data[key] = widget.text().strip()
+        data["target_color"] = normalize_hex(data["target_color"])
+        return data
+
+    def save_settings(self):
+        try:
+            self.settings = self._collect_ui()
+            atomic_save_json(CONFIG_PATH, self.settings)
+            if self.engine and self.engine.isRunning():
+                self.engine.update_settings(self.settings)
+            self.engine_label.setText("Engine: Settings Saved" if not self.engine or not self.engine.isRunning() else "Engine: Running")
+        except Exception as e:
+            QMessageBox.critical(self, APP_NAME, str(e))
+
+    def reload_settings(self):
+        self.settings = load_settings()
+        self._load_to_ui()
+        if self.engine and self.engine.isRunning():
+            self.engine.update_settings(self.settings)
+
+    def pick_color(self):
+        current = QColor(self.color_hex.text())
+        color = QColorDialog.getColor(current if current.isValid() else QColor("#E600FF"), self, "Target Color")
+        if color.isValid():
+            self.color_hex.setText(color.name().upper())
+            self._refresh_color_button()
+            self.save_settings()
+
+    def validate_color(self):
+        try:
+            self.color_hex

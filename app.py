@@ -429,7 +429,7 @@ class EngineThread(QThread):
     def _sticky_fallback(self, settings):
         if settings.get("sticky_aim") and self.last_target:
             elapsed = (time.monotonic() - self.last_target_ts) * 1000
-             max_ms = int(settings.get("sticky_time_ms", 140))
+            max_ms = int(settings.get("sticky_time_ms", 140))
             if elapsed < max_ms:
                 decay = (1 - elapsed / max_ms) * float(settings.get("sticky_strength", 0.55))
                 return int(self.last_target[0] * decay), int(self.last_target[1] * decay), int(self.last_target[2] * decay), True
